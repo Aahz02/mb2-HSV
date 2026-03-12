@@ -12,3 +12,6 @@ Code for the BBC micro:bit v2 that reads from a potentiometer to control HSV val
 ![Circuit Diagram](hsv-schematic.png)
 4. The letter displayed on the mb2 will show which attribute you are adjusting, pressing the a and b buttons will cycle
 them and turning the potentiometer will adjust the currently selected attribute.
+
+## Credits
+hsv-schematic.png: Bart Massey
