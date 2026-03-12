@@ -2,7 +2,7 @@
 #![no_std]
 
 use panic_rtt_target as _;
-use rtt_target::{rprintln, rtt_init_print};
+use rtt_target::rtt_init_print;
 
 use cortex_m_rt::entry;
 use critical_section_lock_mut::LockMut;
@@ -15,10 +15,11 @@ use microbit::{
         Timer,
         gpio,
         pac::{self, interrupt},
+        saadc,
     },
 };
 
-use hsv::{Hsv, Rgb};
+use hsv::Hsv;
 
 struct RgbDisplay {
     // What tick of the frame are we currently on?
@@ -110,10 +111,15 @@ fn main() -> ! {
 
     let mut display = Display::new(board.display_pins);
 
+    let mut saadc = saadc::Saadc::new(board.ADC, saadc::SaadcConfig::default());
+    let mut pot = board.edge.e02.into_floating_input();
+
     let mut timer0 = Timer::new(board.TIMER0);
     let mut timer1 = Timer::new(board.TIMER1);
 
-    unsafe { pac::NVIC::unmask(pac::Interrupt::TIMER0);}
+    unsafe {
+        pac::NVIC::unmask(pac::Interrupt::TIMER0);
+    }
     pac::NVIC::unpend(pac::Interrupt::TIMER0);
     timer0.enable_interrupt();
 
@@ -148,34 +154,44 @@ fn main() -> ! {
     RGB_MUT.init(rgb_display);
 
     let mut state = 0;
-    let mut old_state = 0;
     let mut pressing = false;
 
-    let colors = [
-        Hsv{h: 0.5, s: 0.6, v: 0.9},
-        Hsv{h: 0.9, s: 0.3, v: 0.9},
-        Hsv{h: 0.0, s: 0.0, v: 1.0},
-    ];
+    let mut color = Hsv {
+        h: 0.9,
+        s: 0.3,
+        v: 0.9,
+    };
 
-    RGB_MUT.with_lock(|rgb_display| rgb_display.set(&colors[0]));
+    RGB_MUT.with_lock(|rgb_display| rgb_display.set(&color));
     RGB_MUT.with_lock(|rgb_display| rgb_display.step());
     loop {
         match (button_a.is_low().unwrap(), button_b.is_low().unwrap()) {
-            (true, false) => if !pressing {
-                state = (state + 3 - 1) % 3;
-                pressing = true;
-            },
-            (false, true) => if !pressing {
-                state = (state + 1) % 3;
-                pressing = true;
-            },
+            (true, false) => {
+                if !pressing {
+                    state = (state + 3 - 1) % 3;
+                    pressing = true;
+                }
+            }
+            (false, true) => {
+                if !pressing {
+                    state = (state + 1) % 3;
+                    pressing = true;
+                }
+            }
             _ => pressing = false,
         };
 
-        if state != old_state {
-            RGB_MUT.with_lock(|rgb_display| rgb_display.set(&colors[state]));
-            old_state = state;
+        let p = saadc.read_channel(&mut pot).unwrap();
+        let c = ((p as f32 / ((1 << 14) - 1) as f32).clamp(0.1, 0.9) - 0.1) * (1.0 / 0.8);
+
+        match state {
+            0 => color.h = c,
+            1 => color.s = c,
+            2 => color.v = c,
+            _ => panic!(),
         }
+
+        RGB_MUT.with_lock(|rgb_display| rgb_display.set(&color));
 
         match state {
             0 => display.show(&mut timer1, display_h, 100),
