@@ -1,19 +1,21 @@
 #![no_main]
 #![no_std]
 
-use core::time;
-
-use microbit::{display, hal::gpio::Disconnected, pac};
 use panic_rtt_target as _;
 use rtt_target::{rprintln, rtt_init_print};
 
 use cortex_m_rt::entry;
+use critical_section_lock_mut::LockMut;
 use embedded_hal::digital::{InputPin, OutputPin};
 #[rustfmt::skip]
 use microbit::{
     board::Board,
     display::blocking::Display,
-    hal::{Timer, gpio},
+    hal::{
+        Timer,
+        gpio,
+        pac::{self, interrupt},
+    },
 };
 
 use hsv::{Hsv, Rgb};
@@ -60,8 +62,43 @@ impl RgbDisplay {
     /// Take the next frame update step. Called at startup
     /// and then from the timer interrupt handler.
     fn step(&mut self) {
-        todo!()
+        if self.tick >= 100 {
+            self.tick = 0;
+        }
+        if self.tick == 0 {
+            if let Some(s) = self.next_schedule {
+                self.schedule = s;
+                self.next_schedule = None;
+            }
+
+            for p in &mut self.rgb_pins {
+                p.set_low().unwrap();
+            }
+        }
+
+        for (i, t) in self.schedule.into_iter().enumerate() {
+            if t <= self.tick {
+                self.rgb_pins[i].set_high().unwrap();
+            }
+        }
+
+        let next_tick = self
+            .schedule
+            .into_iter()
+            .filter(|&t| t > self.tick)
+            .min()
+            .unwrap_or(100);
+        let delay = next_tick - self.tick;
+        self.tick = next_tick;
+        self.timer0.start(delay * 10_000 / 100);
     }
+}
+
+static RGB_MUT: LockMut<RgbDisplay> = LockMut::new();
+
+#[interrupt]
+fn TIMER0() {
+    RGB_MUT.with_lock(|rgb_display| rgb_display.step());
 }
 
 #[entry]
@@ -78,6 +115,7 @@ fn main() -> ! {
 
     unsafe { pac::NVIC::unmask(pac::Interrupt::TIMER0);}
     pac::NVIC::unpend(pac::Interrupt::TIMER0);
+    timer0.enable_interrupt();
 
     let display_h = [
         [1, 0, 0, 0, 1],
@@ -101,13 +139,44 @@ fn main() -> ! {
         [0, 0, 1, 0, 0],
     ];
 
+    let rgb_pins = [
+        board.edge.e08.degrade(),
+        board.edge.e09.degrade(),
+        board.edge.e16.degrade(),
+    ];
+    let rgb_display = RgbDisplay::new(rgb_pins, timer0);
+    RGB_MUT.init(rgb_display);
+
     let mut state = 0;
+    let mut old_state = 0;
+    let mut pressing = false;
+
+    let colors = [
+        Hsv{h: 0.5, s: 0.6, v: 0.9},
+        Hsv{h: 0.9, s: 0.3, v: 0.9},
+        Hsv{h: 0.0, s: 0.0, v: 1.0},
+    ];
+
+    RGB_MUT.with_lock(|rgb_display| rgb_display.set(&colors[0]));
+    RGB_MUT.with_lock(|rgb_display| rgb_display.step());
     loop {
         match (button_a.is_low().unwrap(), button_b.is_low().unwrap()) {
-            (true, false) => state = (state + 3 - 1) % 3,
-            (false, true) => state = (state + 1) % 3,
-            _ => (),
+            (true, false) => if !pressing {
+                state = (state + 3 - 1) % 3;
+                pressing = true;
+            },
+            (false, true) => if !pressing {
+                state = (state + 1) % 3;
+                pressing = true;
+            },
+            _ => pressing = false,
         };
+
+        if state != old_state {
+            RGB_MUT.with_lock(|rgb_display| rgb_display.set(&colors[state]));
+            old_state = state;
+        }
+
         match state {
             0 => display.show(&mut timer1, display_h, 100),
             1 => display.show(&mut timer1, display_s, 100),
